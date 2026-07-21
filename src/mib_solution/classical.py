@@ -9,31 +9,21 @@ from .fee_vision import recover_fee_from_pixmap
 from .policy import build_prediction
 
 
-def _ensure_fee_from_scans(packet) -> None:
-    """If fee still missing, classify large embedded page scans.
-
-    Only consider pages that lack a trusted text layer (image-only scans).
-    Require a strong classifier margin so sponsor/registry scans are not
-    mistaken for fee receipts.
-    """
-    if "fee_status" in packet.fields:
-        return
+def _scan_fee_hog(packet) -> tuple[str, float, int] | None:
+    """Best HOG fee label across image-only pages."""
     try:
         import fitz
     except ImportError:
-        return
-
-    # Map page index -> trusted span count from extract
+        return None
     span_by_page = {p.page_index: p.n_trusted_spans for p in packet.pages}
     doc = fitz.open(packet.pdf_path)
     best: tuple[str, float, int] | None = None
     for page_index, page in enumerate(doc):
         if span_by_page.get(page_index, 0) >= 8:
-            continue  # textual page already handled
+            continue
         for imginfo in page.get_images(full=True):
-            xref = imginfo[0]
             try:
-                pix = fitz.Pixmap(doc, xref)
+                pix = fitz.Pixmap(doc, imginfo[0])
             except Exception:
                 continue
             if pix.width < 900 or pix.height < 900:
@@ -43,12 +33,66 @@ def _ensure_fee_from_scans(packet) -> None:
                 continue
             if best is None or fee_conf > best[1]:
                 best = (fee_lab, fee_conf, page_index)
+            if best and best[1] >= 0.8:
+                return best
+    return best
+
+
+def _ensure_fee_from_scans(packet) -> None:
+    """If fee still missing, classify large embedded page scans."""
+    if "fee_status" in packet.fields:
+        return
+    best = _scan_fee_hog(packet)
     if best and best[1] >= 0.62:
         packet.fields["fee_status"] = FieldHit(
             value=best[0], source="ocr", page=best[2], confidence=best[1]
         )
         if "fee_missing" in packet.evidence_issues:
             packet.evidence_issues = [x for x in packet.evidence_issues if x != "fee_missing"]
+
+
+def _reconcile_noisy_fee(packet) -> None:
+    """Override low-confidence OCR fee when HOG strongly disagrees.
+
+    Noisy fee-receipt scans often OCR as the wrong status (e.g. waived vs paid).
+    Prefer high-confidence HOG / amount cues on image-only pages only.
+    """
+    import re
+
+    fee = packet.fields.get("fee_status")
+    if not fee:
+        return
+    # Trusted digital text-layer fee receipts (high confidence) stay put.
+    if fee.source == "fee_receipt" and fee.confidence >= 0.9:
+        # Still allow override if the "fee_receipt" hit came from OCR of a scan
+        # (confidence scaled to ~0.675) — those are < 0.9.
+        return
+
+    # Amount cue from OCR/trusted text on image pages.
+    text = "\n".join(p.trusted_text for p in packet.pages)
+    if re.search(r"\$\s*809", text) and fee.value != "paid":
+        packet.fields["fee_status"] = FieldHit(
+            value="paid", source="receipt_amount_waiver", page=fee.page, confidence=0.7
+        )
+        return
+    if re.search(r"\$\s*0\.00", text) and fee.value == "paid" and fee.confidence < 0.85:
+        # weak paid OCR against zero amount → waived
+        packet.fields["fee_status"] = FieldHit(
+            value="waived", source="receipt_amount_waiver", page=fee.page, confidence=0.65
+        )
+        return
+
+    if fee.confidence >= 0.85:
+        return
+
+    best = _scan_fee_hog(packet)
+    if not best:
+        return
+    hog_lab, hog_conf, page = best
+    if hog_conf >= 0.75 and hog_lab != fee.value:
+        packet.fields["fee_status"] = FieldHit(
+            value=hog_lab, source="ocr", page=page, confidence=hog_conf
+        )
 
 
 def _purpose_from_sponsor(packet) -> None:
@@ -116,6 +160,7 @@ def predict_pdf(pdf_path: str | Path, case_id: str | None = None) -> dict:
     packet = extract_packet(pdf_path, case_id=case_id or pdf_path.stem)
     _purpose_from_sponsor(packet)
     _ensure_fee_from_scans(packet)
+    _reconcile_noisy_fee(packet)
     _cleanup_fields(packet)
 
     # If fee recovered after extract, drop fee_missing issue.
