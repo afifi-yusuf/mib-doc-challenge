@@ -56,14 +56,23 @@ def classify_fee_status(image_bgr: np.ndarray, min_margin: float = 1.5) -> tuple
         gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
     else:
         gray = image_bgr
+
+    # Downscale large scans — fee header text remains readable at ~700px wide.
+    h0, w0 = gray.shape[:2]
+    if w0 > 800:
+        scale = 800 / float(w0)
+        gray = cv2.resize(gray, (int(w0 * scale), int(h0 * scale)), interpolation=cv2.INTER_AREA)
+
     gray = _preprocess(gray)
     h, w = gray.shape
-    region = gray[: int(h * 0.42), : int(w * 0.72)]
+    # Header band only (fee status lives top-left on fee receipts).
+    region = gray[: int(h * 0.32), : int(w * 0.65)]
 
     wins: list[np.ndarray] = []
-    for wh, ww in ((28, 56), (32, 64), (40, 80), (36, 96)):
-        step_y = max(6, wh // 3)
-        step_x = max(6, ww // 3)
+    # Coarse stride for speed; two window sizes cover typical glyph aspect.
+    for wh, ww in ((28, 64), (36, 88)):
+        step_y = max(10, wh // 2)
+        step_x = max(12, ww // 2)
         for y0 in range(0, max(1, region.shape[0] - wh), step_y):
             for x0 in range(0, max(1, region.shape[1] - ww), step_x):
                 crop = cv2.resize(region[y0 : y0 + wh, x0 : x0 + ww], (64, 32))
@@ -81,30 +90,27 @@ def classify_fee_status(image_bgr: np.ndarray, min_margin: float = 1.5) -> tuple
     probs = clf.predict_proba(np.asarray(wins))
     classes = list(clf.classes_)
     votes: Counter[str] = Counter()
-    top_conf = 0.0
     for p in probs:
         j = int(p.argmax())
         conf = float(p[j])
-        if conf >= 0.52:
+        if conf >= 0.55:
             votes[str(classes[j])] += conf
-            top_conf = max(top_conf, conf)
     if not votes:
         return None, 0.0
     ranked = votes.most_common()
     best_lab, best_score = ranked[0]
     second = ranked[1][1] if len(ranked) > 1 else 0.0
-    if best_score < 4.0:
+    if best_score < 3.0:
         return None, 0.0
     if second > 0 and best_score / second < min_margin:
         return None, 0.0
-    # Map confidence into [0.55, 0.85]
-    conf = min(0.85, 0.55 + 0.02 * best_score)
+    conf = min(0.85, 0.55 + 0.025 * best_score)
     return best_lab, conf
 
 
 def recover_fee_from_pixmap(pix) -> tuple[str | None, float]:
     """Accept a PyMuPDF Pixmap-like object."""
-    import fitz  # local import to keep module import light
+    import fitz
 
     if pix.n > 4:
         pix = fitz.Pixmap(fitz.csRGB, pix)

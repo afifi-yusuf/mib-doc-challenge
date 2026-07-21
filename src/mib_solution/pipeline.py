@@ -22,10 +22,14 @@ def run_pipeline(input_dir: Path, output_path: Path, workers: int = 4) -> int:
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     results: dict[str, dict] = {}
+    done = 0
     if workers <= 1 or len(pdfs) <= 1:
         for pdf in pdfs:
             rec = _process_one(str(pdf))
             results[rec["case_id"]] = rec
+            done += 1
+            if done % 25 == 0:
+                print(f"progress {done}/{len(pdfs)}", file=sys.stderr, flush=True)
     else:
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {pool.submit(_process_one, str(pdf)): pdf for pdf in pdfs}
@@ -36,6 +40,9 @@ def run_pipeline(input_dir: Path, output_path: Path, workers: int = 4) -> int:
                 except Exception as exc:  # noqa: BLE001
                     pdf = futures[fut]
                     print(f"WARN: failed {pdf.name}: {exc}", file=sys.stderr)
+                done += 1
+                if done % 25 == 0:
+                    print(f"progress {done}/{len(pdfs)}", file=sys.stderr, flush=True)
 
     with output_path.open("w", encoding="utf-8") as f:
         for case_id in sorted(results):

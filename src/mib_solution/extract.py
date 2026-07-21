@@ -446,43 +446,27 @@ def _ocr_image(img: Image.Image, try_rotate: bool = False) -> str:
         return ""
     chunks: list[str] = []
     w, h = img.size
-    # Prefer header/top band — full-page noisy scans are extremely slow.
-    header = img.crop((0, 0, max(1, int(w * 0.9)), max(1, int(h * 0.42))))
-    mid = img.crop((0, int(h * 0.2), w, min(h, int(h * 0.65))))
+    header = img.crop((0, 0, max(1, int(w * 0.9)), max(1, int(h * 0.45))))
 
-    def _run(target: Image.Image, sharpen: bool = False) -> None:
+    def _run(target: Image.Image) -> None:
         gray = ImageOps.autocontrast(ImageOps.grayscale(target))
-        # Downscale huge scans for speed while keeping legibility.
         gw, gh = gray.size
-        if max(gw, gh) > 1600:
-            scale = 1600 / float(max(gw, gh))
+        if max(gw, gh) > 1200:
+            scale = 1200 / float(max(gw, gh))
             gray = gray.resize((max(1, int(gw * scale)), max(1, int(gh * scale))))
-        if sharpen:
-            gray = gray.filter(ImageFilter.SHARPEN)
         try:
-            chunks.append(pytesseract.image_to_string(gray, config="--psm 6"))
+            chunks.append(
+                pytesseract.image_to_string(gray, config="--psm 6", timeout=8)
+            )
         except Exception:
             pass
 
-    _run(header, sharpen=False)
-    _run(header, sharpen=True)
-    # Mid band helps biometric observed-flags / intake bodies.
-    if h >= 800:
-        _run(mid, sharpen=False)
-    if try_rotate:
-        gray = ImageOps.autocontrast(ImageOps.grayscale(header))
-        for angle in (90, 270):
-            try:
-                chunks.append(
-                    pytesseract.image_to_string(gray.rotate(angle, expand=True), config="--psm 6")
-                )
-            except Exception:
-                continue
+    _run(header)
     return "\n".join(chunks)
 
 
 def _ocr_page(
-    page: fitz.Page, doc: fitz.Document, dpi: int = 140, try_rotate: bool = False
+    page: fitz.Page, doc: fitz.Document, dpi: int = 110, try_rotate: bool = False
 ) -> str:
     parts: list[str] = []
     embedded_ok = False
