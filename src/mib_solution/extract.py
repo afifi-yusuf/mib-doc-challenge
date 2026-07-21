@@ -580,13 +580,16 @@ def extract_packet(pdf_path: Path, case_id: str | None = None) -> PacketExtract:
         pages.append(pe)
 
     critical_keys = ["applicant_name", "visa_class", "fee_status", "arrival_date", "species_code"]
-    critical_missing = any(k not in merged for k in critical_keys)
+    missing_critical = [k for k in critical_keys if k not in merged]
+    critical_missing = bool(missing_critical)
+    # Fee-only gaps are handled by HOG fee vision in classical.py — skip Tesseract.
+    fee_only_missing = missing_critical == ["fee_status"]
     image_heavy = trusted_span_count < 12
 
-    # Pass 2: OCR when needed
-    if critical_missing or image_heavy or "manual_finding" not in merged:
+    # Pass 2: OCR only when non-fee critical fields are still missing.
+    if critical_missing and not fee_only_missing:
         for pe, page in zip(pages, doc):
-            if not _page_needs_ocr(pe, critical_missing or image_heavy):
+            if not _page_needs_ocr(pe, True):
                 # Still OCR adjudicator-looking image pages with almost no text
                 if pe.n_trusted_spans >= 8:
                     continue

@@ -45,10 +45,13 @@ def run_pipeline(input_dir: Path, output_path: Path, workers: int = 4) -> int:
 
 
 def main(argv: list[str] | None = None) -> None:
+    import os
+
     argv = list(sys.argv[1:] if argv is None else argv)
     if len(argv) != 2:
         raise SystemExit("usage: solution.py <input_pdf_dir> <output_predictions_path>")
-    n = run_pipeline(Path(argv[0]), Path(argv[1]), workers=4)
+    workers = int(os.environ.get("MIB_WORKERS", "2"))
+    n = run_pipeline(Path(argv[0]), Path(argv[1]), workers=workers)
     print(f"wrote {n} predictions to {argv[1]}", file=sys.stderr)
 
 
